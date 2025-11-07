@@ -8,15 +8,31 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "csurf": "^1.11.0",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
     "rate-limit": "^0.1.1"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/csurf": "^1.11.5",
     "@types/express": "^5.0.5",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.10.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Anvar4/Ddos-attack.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Anvar4/Ddos-attack/issues"
+  },
+  "homepage": "https://github.com/Anvar4/Ddos-attack#readme",
+  "description": ""
 }

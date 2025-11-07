@@ -35,7 +35,10 @@
     // Recommended Options
     "strict": true,
     "jsx": "react-jsx",
-    "verbatimModuleSyntax": true,
+  "verbatimModuleSyntax": false,
+  "esModuleInterop": true,
+  "allowSyntheticDefaultImports": true,
+  "moduleResolution": "nodenext",
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",

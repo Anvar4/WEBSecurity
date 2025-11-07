@@ -1,66 +1,155 @@
-// Bu kodning asosiy maqsadi va ishlash printsiplari:
-// Har bir client (IP manzil bo'yicha) uchun alohida "chelak" (bucket) yaratiladi.
+/**
+ * app.ts
+ * ----------------------------
+ * Bitta TypeScript faylda minimal va amaliy xavfsizlik qatlamlari bilan
+ * Express server misoli:
+ *   - Helmet (HTTP header security)
+ *   - Rate limiting (express-rate-limit)
+ *   - CSRF himoyasi (csurf)
+ *   - JWT autentifikatsiya (cookie orqali)
+ *   - Xato middleware (xatolarni yashirish)
+ *
+ * Qanday ishlaydi:
+ *   1) POST /login   -> username + password yubor (demo: password = "12345")
+ *        - muvaffaqiyatli bo'lsa, cookie sifatida JWT yuboradi va csrf token qaytaradi
+ *   2) GET /profile  -> cookie ichidagi JWT orqali autentifikatsiya qilinadi
+ *
+ * Talablar (terminalda bir marta):
+ *   npm init -y
+ *   npm i express helmet express-rate-limit jsonwebtoken cookie-parser csurf
+ *   npm i -D typescript ts-node @types/express @types/node @types/jsonwebtoken @types/cookie-parser
+ *   npx tsc --init
+ *
+ * Ishga tushirish:
+ *   npx ts-node app.ts
+ *
+ * Muhim xavfsizlik eslatmalari (production uchun):
+ *   - HAR DOIM process.env.SECRET ni o'rnating; fayl ichida qattiq kodlangan sirlardan foydalanmang.
+ *   - HTTPS qo'llang (secure cookie uchun res.cookie(... secure: true)).
+ *   - CSRF tokenni clientda to'g'ri saqlang va har POST/PUT/DELETE so'rovga yuboring.
+ *   - Rate limit parametrlarini trafik va biznes talablariga moslang.
+ *   - Loglarni va monitoringni qo'shing (Sentry/Loggly/Grafana).
+ *
 
-// Har bir bucket'da ma'lum miqdorda token bo'ladi (maksimum 50 ta).
+ */
 
-// Vaqt o'tishi bilan tokenlar sekin-asta to'ldiriladi (sekundiga 10 ta).
+import cookieParser from "cookie-parser";
+import csurf from "csurf";
+import express, { NextFunction, Request, Response } from "express";
+import rateLimit from "express-rate-limit";
+import helmet from "helmet";
+import jwt from "jsonwebtoken";
 
-// Har bir API so'rovi uchun 1 ta token sarflanadi.
+const app = express();
+const PORT = Number(process.env.PORT || 3000);
 
-// Agar client'da yetarli token bo'lmasa, "Too many requests" xatosi qaytariladi.
+// === Konfiguratsiya / Muhit o'zgaruvchilari ===
+// SECRET ni productionda muhofaza qiling (masalan: environment variable, secrets manager)
+const SECRET = process.env.SECRET || "SUPER_TIZIM_SIRI"; // PRODUCTION: o'zgartiring!
 
-import { Request, Response, NextFunction } from 'express';
+// Agar orqa tomonda Cloudflare yoki boshqa proxy bo'lsa:
+// app.set('trust proxy', true);
+app.set("trust proxy", true);
 
-// Bu type API so'rovlarini cheklash uchun har bir client uchun saqlanadigan ma'lumotlarni belgilaydi
-type Bucket = {
-    tokens: number;  // Qolgan tokenlar soni
-    last: number;    // Oxirgi so'rov vaqti (millisekundlarda)
-};
+// --- 1. Middlewarelar ---
+app.use(helmet()); // Xavfsiz HTTP headerlar
+app.use(express.json());
+app.use(cookieParser());
 
-// Asosiy sozlamalar
-const RATE = 10;            // Har sekundda qo'shiladigan tokenlar soni
-const CAPACITY = 50;        // Maksimal token sig'imi
-const REFILL_INTERVAL = 1000; // Token to'ldirish intervali (ms)
+// --- 2. Rate limit (DDoS va brute-force'ga qarshi) ---
+const limiter = rateLimit({
+  windowMs: 60 * 1000, // 1 daqiqa
+  max: 10, // Har IP uchun 1 daqiqada maksimal 10 ta so'rov
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Juda ko'p so'rov! Keyinroq urinib ko'ring.",
+});
+app.use(limiter);
 
-// Barcha clientlar uchun bucket'larni saqlash
-const buckets = new Map<string, Bucket>();
+// --- 3. CSRF himoyasi ---
+// CSRF cookie orqali ishlaydi: client login bo'lgach server tomonidan yuborilgan csrf tokenni
+// har POST/PUT/DELETE so'rovga yuborishi kerak (odatda header yoki form field orqali).
+const csrfProtection = csurf({
+  cookie: true,
+});
+app.use(csrfProtection);
 
-// Client identifikatorini olish uchun funksiya
-function getKey(req: Request) {
-    // IP manzilni olishning turli usullari
-    return (req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress) as string;
+// --- 4. JWT bilan autentifikatsiya middleware'i ---
+function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ message: "Token topilmadi" });
+
+  try {
+    const decoded = jwt.verify(token, SECRET) as { id: number; name: string };
+    (req as any).user = decoded;
+    next();
+  } catch (err) {
+    return res.status(403).json({ message: "Noto'g'ri yoki muddati o'tgan token" });
+  }
 }
 
-// Asosiy middleware funksiyasi
-export function tokenBucket(req: Request, res: Response, next: NextFunction) {
-    // Client ID'sini olish
-    const key = getKey(req) || 'anon';
-    const now = Date.now();
-    let bucket = buckets.get(key);
+// --- 5. Oddiy login endpoint (demo maqsadida) ---
+// Eslatma: real loyihada parollarni hashing (bcrypt) bilan saqlang va tekshiring.
+app.post("/login", (req: Request, res: Response) => {
+  const { username, password } = req.body;
 
-    // Yangi client uchun bucket yaratish
-    if (!bucket) {
-        bucket = { tokens: CAPACITY, last: now };
-        buckets.set(key, bucket);
-    }
+  // Demo uchun oddiy tekshiruv (haqiqiy loyihada emas)
+  if (!username || !password) {
+    return res.status(400).json({ message: "username va password kerak" });
+  }
 
-    // Tokenlarni qayta to'ldirish
-    const delta = (now - bucket.last) / 1000;  // Oxirgi so'rovdan beri o'tgan vaqt (sekundlarda)
-    if (delta > 0) {
-        // Yangi tokenlar qo'shish, lekin CAPACITY dan oshmasligi kerak
-        bucket.tokens = Math.min(CAPACITY, bucket.tokens + delta * RATE);
-        bucket.last = now;
-    }
+  if (password !== "12345") return res.status(401).json({ message: "Parol xato" });
 
-    // Har bir so'rov uchun "narx"
-    const cost = 1;
+  const token = jwt.sign({ id: 1, name: username }, SECRET, { expiresIn: "1h" });
 
-    // Agar yetarli token bo'lsa
-    if (bucket.tokens >= cost) {
-        bucket.tokens -= cost;  // Token ishlatiladi
-        next();  // So'rov davom etadi
-    } else {
-        // Token yetarli bo'lmasa, 429 (Too Many Requests) xatosi qaytariladi
-        res.status(429).json({ error: 'Too many requests — slow down' });
-    }
-}
+  // Cookie sozlamalari:
+  // - httpOnly: true  -> JS orqali o'qilmaydi (XSSga qarshi)
+  // - secure: true    -> faqat HTTPS bo'lganda yuboriladi (productionda true qilinsin)
+  // - sameSite: 'strict' -> CSRF xavfini kamaytiradi
+  res.cookie("token", token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production", // productionda HTTPS bo'lsa true
+    sameSite: "strict",
+    maxAge: 60 * 60 * 1000, // 1 soat
+  });
+
+  // CSRF tokenni clientga yuboramiz (client uni keyingi so'rovlarda yuborishi kerak)
+  res.json({ message: "Login muvaffaqiyatli", csrfToken: req.csrfToken() });
+});
+
+// --- 6. Himoyalangan endpoint ---
+app.get("/profile", authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  res.json({
+    message: `Salom, ${user.name}! Bu sahifa faqat autentifikatsiyadan o'tgan foydalanuvchilar uchun.`,
+  });
+});
+
+// --- 7. Logout (cookie o'chirish) ---
+app.post("/logout", (req: Request, res: Response) => {
+  res.clearCookie("token");
+  res.json({ message: "Chiqish amalga oshirildi" });
+});
+
+// --- 8. Xatoliklarni boshqarish ---
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  // CSRF token bilan bog'liq xato
+  if (err && err.code === "EBADCSRFTOKEN") {
+    return res.status(403).json({ message: "CSRF token noto'g'ri yoki yo'q" });
+  }
+
+  // Rate limiter xabari avtomatik qaytariladi, ammo boshqa xatolarni tutamiz
+  console.error("Server xatosi:", err && err.stack ? err.stack : err);
+  // Foydalanuvchiga texnik tafsilotlarni bermaymiz
+  res.status(500).json({ message: "Serverda xato yuz berdi" });
+});
+
+// --- 9. Test uchun oddiy root endpoint ---
+app.get("/", (req: Request, res: Response) => {
+  res.send("Server ishlayapti. /login bilan boshlang.");
+});
+
+// --- 10. Serverni ishga tushirish ---
+app.listen(PORT, () => {
+  console.log(`✅ Server ishga tushdi: http://localhost:${PORT} (PORT=${PORT})`);
+});
